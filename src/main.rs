@@ -319,12 +319,16 @@ fn eat_food(
 }
 
 fn collision_check(
+    mut commands: Commands,
     win_size: Res<WinSize>,
     tick: Res<Tick>,
-    entity_vector: Res<EntityVector>,
-    body_query: Query<&Transform, Without<Food>>,
+    mut entity_vector: ResMut<EntityVector>,
+    body_query: Query<&mut Transform, Without<Food>>,
 ) {
     if tick.allowed {
+
+        let mut finished:bool = false;
+
         let first_entity = entity_vector.vector.first().unwrap();
         let head_transform = body_query.get(*first_entity).unwrap();
 
@@ -333,7 +337,8 @@ fn collision_check(
             || head_transform.translation.y > win_size.h as f32 / 2.
             || head_transform.translation.y < -win_size.h as f32 / 2.
         {
-            println!("NERE GİDİYON AMK")
+            println!("NERE GİDİYON AMK");
+            finished = true;
         }
 
         let mut skip_part_count: i8 = 3;
@@ -344,9 +349,18 @@ fn collision_check(
             }
             if let Ok(body_transform) = body_query.get(*entity) {
                 if head_transform.translation == body_transform.translation {
-                    println!("YOU LOST! BUT I'M TOO LAZY TO RESET THE GAME!")
+                    finished = true;
+                    break;
                 }
             }
+        }
+
+        if finished{
+            
+            for entity in &entity_vector.vector[1..] {
+                commands.entity(*entity).despawn();
+            }
+            entity_vector.vector = entity_vector.vector[..1].to_vec();
         }
     }
 }
