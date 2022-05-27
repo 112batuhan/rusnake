@@ -73,6 +73,14 @@ impl Tick {
         Tick { allowed: true }
     }
 }
+pub struct Heyronii {
+    moan: Handle<AudioSource>,
+}
+pub struct LateSpawn {
+    translation: Vec3,
+    spawn: bool,
+    wait:bool,
+}
 // */Resources
 
 // /*Components
@@ -105,15 +113,15 @@ fn main() {
         .add_startup_system_to_stage(StartupStage::PostStartup, initialize_snake)
         .add_startup_system_to_stage(StartupStage::PostStartup, initialize_food)
         .add_system(track_step_time.label(Labels::UPDATE))
-        .add_system(get_next_move.label(Labels::HeadMove).after(Labels::UPDATE))
-        .add_system(tail_follow.label(Labels::TailMove).after(Labels::UPDATE))
-        .add_system(move_snake.label(Labels::HeadMove).after(Labels::TailMove))
-        .add_system(eat_food.label(Labels::SPAWN).after(Labels::UPDATE))
+        .add_system(get_next_move.label(Labels::HeadMove))
+        .add_system(move_snake.label(Labels::HeadMove).after(Labels::UPDATE))
+        .add_system(eat_food.label(Labels::COLLISION).after(Labels::UPDATE))
         .add_system(
             collision_check
                 .label(Labels::COLLISION)
                 .after(Labels::TailMove),
         )
+        .add_system(spawn_new_tail.label(Labels::SPAWN).before(Labels::HeadMove).before(Labels::TailMove))
         .run();
 }
 
@@ -130,7 +138,12 @@ fn track_step_time(
     }
 }
 
-fn setup_system(mut commands: Commands, mut windows: ResMut<Windows>, time: Res<Time>) {
+fn setup_system(
+    mut commands: Commands,
+    mut windows: ResMut<Windows>,
+    time: Res<Time>,
+    asset_server: Res<AssetServer>,
+) {
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
 
     let window = windows.get_primary_mut().unwrap();
@@ -145,6 +158,15 @@ fn setup_system(mut commands: Commands, mut windows: ResMut<Windows>, time: Res<
     });
     commands.insert_resource(EntityVector::new());
     commands.insert_resource(Tick::new());
+
+    let music: Handle<AudioSource> = asset_server.load("heyronii.ogg");
+    commands.insert_resource(Heyronii { moan: music });
+
+    commands.insert_resource(LateSpawn {
+        translation: Vec3::new(0., 0., 0.),
+        spawn: false,
+        wait: true,
+    })
 }
 
 fn initialize_snake(mut commands: Commands, mut entity_vector: ResMut<EntityVector>) {
@@ -215,47 +237,39 @@ fn move_snake(
     direction_map: Res<DirectionVelocityMap>,
     mut head_query: Query<(&mut Velocity, &NextDirection, &mut Transform), With<Head>>,
     tick: Res<Tick>,
-) {
-    if tick.allowed {
-        let (mut velocity, next_direction, mut transform) = head_query.single_mut();
-        velocity.direction = next_direction.direction;
-        transform.translation.x +=
-            direction_map.map.get(&velocity.direction).unwrap().x as f32 * GRID_SIZE;
-        transform.translation.y +=
-            direction_map.map.get(&velocity.direction).unwrap().y as f32 * GRID_SIZE;
-    }
-}
-
-fn tail_follow(
-    tick: Res<Tick>,
     entity_vector: ResMut<EntityVector>,
-    mut body_query: Query<&mut Transform, Without<Food>>,
+    mut body_query: Query<&mut Transform, (Without<Food>, Without<Head>)>,
 ) {
     if tick.allowed {
+        let (mut velocity, next_direction, mut head_transform) = head_query.single_mut();
+
+        velocity.direction = next_direction.direction;
+        head_transform.translation.x +=
+            direction_map.map.get(&velocity.direction).unwrap().x as f32 * GRID_SIZE;
+        head_transform.translation.y +=
+            direction_map.map.get(&velocity.direction).unwrap().y as f32 * GRID_SIZE;
+
         let mut current_position: Vec3;
-        let mut position_for_next: Vec3 = Vec3::new(0., 0., 0.);
-        let mut first: bool = true;
-        for entity in &entity_vector.vector {
+        let mut position_for_next: Vec3 = head_transform.translation.clone();
+        for entity in &entity_vector.vector[1..] {
             if let Ok(mut transform) = body_query.get_mut(*entity) {
-                if first {
-                    position_for_next = transform.translation.clone();
-                    first = false;
-                    continue;
-                }
                 current_position = transform.translation.clone();
-                transform.translation = position_for_next;
+                transform.translation = position_for_next.clone();
                 position_for_next = current_position.clone();
             }
         }
     }
 }
 
+
+
+
 fn eat_food(
-    mut commands: Commands,
     win_size: Res<WinSize>,
-    mut entity_vector: ResMut<EntityVector>,
+    entity_vector: Res<EntityVector>,
     body_query: Query<&Transform, Without<Food>>,
     mut food_query: Query<&mut Transform, With<Food>>,
+    mut tail_spawner: ResMut<LateSpawn>,
 ) {
     let first_entity = entity_vector.vector.first().unwrap();
     let head_transform = body_query.get(*first_entity).unwrap();
@@ -265,29 +279,14 @@ fn eat_food(
         && head_transform.translation.y == food_transform.translation.y
     {
         let last_entity = entity_vector.vector.last().unwrap();
-        let last_transform = body_query.get(*last_entity).unwrap();
-
-        let tail_entity = commands
-            .spawn_bundle(SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(1., 1., 1.),
-                    custom_size: Some(Vec2::new(TAIL_SIZE, TAIL_SIZE)),
-                    ..Default::default()
-                },
-                transform: Transform {
-                    translation: last_transform.translation,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .insert(Tail)
-            .id();
-
-        entity_vector.vector.push(tail_entity);
+        if let Ok(last_transform) = body_query.get(*last_entity) {
+            tail_spawner.spawn = true;
+            tail_spawner.translation = last_transform.translation.clone();
+            println!("pos alındı")
+        }
 
         let mut not_broken: bool;
-
-        loop{
+        loop {
             not_broken = true;
             for entity in &entity_vector.vector {
                 if let Ok(body_transform) = body_query.get(*entity) {
@@ -318,16 +317,56 @@ fn eat_food(
     }
 }
 
+fn spawn_new_tail(
+    mut commands: Commands,
+    mut entity_vector: ResMut<EntityVector>,
+    body_query: Query<&Transform, Without<Food>>,
+    mut tail_spawner: ResMut<LateSpawn>,
+    tick: Res<Tick>,
+) {
+    if tick.allowed {
+        let last_entity = entity_vector.vector.last().unwrap();
+        if let Ok(last_transform) = body_query.get(*last_entity) {
+            if tail_spawner.spawn && last_transform.translation != tail_spawner.translation {
+                if !tail_spawner.wait{
+                    
+                    let tail_entity = commands
+                        .spawn_bundle(SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::rgb(1., 1., 1.),
+                                custom_size: Some(Vec2::new(TAIL_SIZE, TAIL_SIZE)),
+                                ..Default::default()
+                            },
+                            transform: Transform {
+                                translation: last_transform.translation,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .insert(Tail)
+                        .id();
+
+                    entity_vector.vector.push(tail_entity);
+                    tail_spawner.spawn = false;
+                    tail_spawner.wait = true;
+                }
+                tail_spawner.wait = false;
+            }
+        }
+    }
+}
+
 fn collision_check(
     mut commands: Commands,
     win_size: Res<WinSize>,
     tick: Res<Tick>,
     mut entity_vector: ResMut<EntityVector>,
     body_query: Query<&mut Transform, Without<Food>>,
+    ronii: Res<Heyronii>,
+    audio: Res<Audio>,
 ) {
     if tick.allowed {
-
-        let mut finished:bool = false;
+        let mut finished: bool = false;
 
         let first_entity = entity_vector.vector.first().unwrap();
         let head_transform = body_query.get(*first_entity).unwrap();
@@ -340,27 +379,25 @@ fn collision_check(
             println!("NERE GİDİYON AMK");
             finished = true;
         }
-
-        let mut skip_part_count: i8 = 3;
-        for entity in &entity_vector.vector {
-            if skip_part_count > 0 {
-                skip_part_count -= 1;
-                continue;
-            }
-            if let Ok(body_transform) = body_query.get(*entity) {
-                if head_transform.translation == body_transform.translation {
-                    finished = true;
-                    break;
+        if entity_vector.vector.len() > 2 {
+            for entity in &entity_vector.vector[2..] {
+                if let Ok(body_transform) = body_query.get(*entity) {
+                    if head_transform.translation == body_transform.translation {
+                        println!("AAAAAAAAAAAA");
+                        finished = true;
+                        break;
+                    }
                 }
             }
         }
 
-        if finished{
-            
+        if finished {
             for entity in &entity_vector.vector[1..] {
                 commands.entity(*entity).despawn();
             }
             entity_vector.vector = entity_vector.vector[..1].to_vec();
+
+            audio.play(ronii.moan.clone());
         }
     }
 }
